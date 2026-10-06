@@ -68,7 +68,60 @@ def curate_skills(results_dir="results", source_condition="baseline", out_dir=No
     model mặc định: make_model() (lab.model).
     Trả về: danh sách đường dẫn SKILL.md đã ghi.
     """
-    raise NotImplementedError("TODO: cài đặt curate_skills (xem guides/pseudocode/04_curator.md)")
+    from .model import make_model
+
+    results_root = Path(results_dir) / source_condition
+    runs = []
+    if results_root.exists():
+        for run_file in sorted(results_root.glob("*/run.json")):
+            record = __import__("json").loads(run_file.read_text(encoding="utf-8"))
+            if record.get("role") != "learn":
+                continue
+            failed = [
+                (check.get("name", ""), check.get("detail", ""))
+                for check in record.get("checks", [])
+                if not check.get("passed")
+            ]
+            if failed:
+                trace_file = run_file.with_name("trace.md")
+                trace = trace_file.read_text(encoding="utf-8")[-6000:] if trace_file.exists() else ""
+                runs.append((record.get("task", run_file.parent.name), failed, trace))
+    if not runs:
+        print("không có check thất bại ở tác vụ học")
+        return []
+
+    sections = []
+    for task, failed, trace in runs:
+        checks = "\n".join(f"- {name}: {detail}" for name, detail in failed)
+        sections.append(f"TASK: {task}\nFAILED CHECKS:\n{checks}\nTRACE (tail):\n{trace}")
+    prompt = f"""You write concise, general SKILL.md files for an engineering assistant.
+Infer reusable procedures from the failed learning-task checks below. Do not include task-specific
+answers, identifiers, filenames, expected values, or evaluation-only material.
+Write at most {max_skills} skills using exactly:
+=== SKILL: <name> ===
+---
+name: <name>
+description: <one sentence describing when to use it>
+---
+<imperative checklist, at most 40 lines>
+=== END ===
+
+Learning feedback:
+{chr(10).join(sections)}
+"""
+    reply = (model or make_model()).invoke(prompt)
+    content = getattr(reply, "content", reply)
+    target = Path(out_dir) if out_dir is not None else ROOT / "skills" / "auto"
+    written = []
+    for name, text in parse_skill_blocks(str(content)):
+        if len(written) >= max_skills or validate_skill(text, expected_name=name):
+            continue
+        skill_dir = target / name
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        path = skill_dir / "SKILL.md"
+        path.write_text(text + "\n", encoding="utf-8")
+        written.append(path)
+    return written
 
 
 if __name__ == "__main__":
